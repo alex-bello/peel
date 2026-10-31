@@ -1,0 +1,17 @@
+# Managed by peel (setup.sh). Installed to /etc/systemd/system/lprint.service
+# only when neither the lprint package nor the snap ships a unit of its own.
+# The binary path and any server options below are filled in by setup.sh.
+[Unit]
+Description=LPrint label printer server
+Documentation=https://github.com/michaelrsweet/lprint
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@LPRINT@ server@SERVER_OPTIONS@
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -13,3 +13,6 @@
 # PNPM (repository tooling only)
 node_modules/
 
+
+# peel local configuration (copy of config.env.example)
+config.env
