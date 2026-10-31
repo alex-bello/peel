@@ -13,3 +13,5 @@
 # PNPM (repository tooling only)
 node_modules/
 
+# Local configuration (never commit)
+config.env

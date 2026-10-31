@@ -1,0 +1,42 @@
+# Managed by peel (setup.sh). On the apt path it is ALWAYS rendered to
+# /etc/systemd/system/lprint.service, which takes precedence over any unit the package ships
+# in /usr/lib/systemd/system (OBSERVED on the Pi: the Debian lprint deb ships one and its
+# postinst starts it on install).
+# The snap path does not use this file.
+# Modeled on upstream's lprint.service (per upstream docs: Type=simple,
+# `lprint server -o log-file=-`, Requires=avahi-daemon.socket), plus User=/Group= for the
+# dedicated service user.
+# The placeholders are filled in by render_unit in scripts/lib.sh.
+# OBSERVED on the Pi: `lprint server` runs as the non-root user and claims the USB device.
+# OBSERVED on the Pi: StateDirectory/HOME below make LPrint's per-user config persist;
+# /var/lib/lprint/.lprint.conf was present after a config write plus a restart (LPrint appears
+# to write it on shutdown, not on every change).
+[Unit]
+Description=LPrint label printer server
+Documentation=https://github.com/michaelrsweet/lprint
+After=network-online.target avahi-daemon.socket
+Wants=network-online.target
+Requires=avahi-daemon.socket
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+# OBSERVED on the Pi: the service user's home is /nonexistent, so a per-user server could not
+# write ~/.lprint.conf (per the lprint 1.3.1 man page, a per-user server keeps printer config
+# there). StateDirectory creates /var/lib/@STATE_NAME@ owned by User= and makes it writable;
+# HOME points LPrint at it. This works for a user that already exists, without usermod.
+StateDirectory=@STATE_NAME@
+StateDirectoryMode=0750
+Environment=HOME=@STATE_DIR@
+ExecStart=@LPRINT@ server @SERVER_OPTIONS@
+# NoNewPrivileges is safe whatever LPrint's state paths turn out to be. Stricter sandboxing
+# (ProtectSystem, ReadWritePaths, ...) is deferred. Do NOT add PrivateTmp: OBSERVED on the Pi,
+# the non-root server's CLI socket is /tmp/lprint<uid>.sock (e.g. /tmp/lprint999.sock) and
+# PrivateTmp would hide it from `sudo -u lprint lprint ...`.
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
