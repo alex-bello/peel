@@ -15,14 +15,17 @@ for anything about peel itself.
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm run validate` | Syntax-check `setup.sh` and every `scripts/*.sh` (`bash -n`), then validate `.sdlc.yml` |
+| `pnpm run validate` | The gate: `lint`, then `test`, then validate `.sdlc.yml` |
+| `pnpm run lint` | `bash -n` and `shellcheck -x` on every shell script (`tools/lint.sh`) |
+| `pnpm run test` | Run every `tests/test-*.sh` (`tests/run.sh`) |
 | `pnpm run sdlc:validate-config -- .sdlc.yml` | Validate the SDLC configuration only |
 
 `scripts/sdlc/validate-config.mjs` is a vendored copy of the validator shipped with the
 `sdlc` skill. Refresh it deliberately from the skill; do not edit it in place.
 
-`validate` is syntax-only. There is no shell linter, formatter, or automated test suite yet.
-Adding `shellcheck` or tests is a dependency decision and needs approval first.
+`shellcheck` is required for `lint` and `validate`. It is a developer tool installed with the
+OS package manager, not a package dependency. There is no formatter. Tests are plain bash
+(`tests/lib.sh`); adding a test framework or any other dependency needs approval first.
 
 ## Delivery
 
@@ -45,7 +48,8 @@ verification. For peel specifically:
 - A script, doc, or output that has not run on a real Raspberry Pi 3B with a DYMO LabelWriter
   450 Turbo must say so. Never present guessed output as observed. Hardware steps require
   manual evidence in the PR.
-- "Tests" today means `pnpm run validate` plus hand-run steps recorded in the PR. If real
+- "Tests" means `pnpm run validate` (lint plus `tests/`) plus hand-run hardware steps recorded
+  in the PR. Logic that can be tested without hardware needs a test in `tests/`. If real
   hardware contradicts a stated assumption, say so plainly and stop rather than work around it.
 - Unrelated changes are rejected in review.
 
