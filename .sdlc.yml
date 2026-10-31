@@ -9,7 +9,7 @@ branch:
 implementation:
   create_branch: true
   use_worktree: true
-  worktree_root: ../chute-worktrees
+  worktree_root: ../peel-worktrees
   commit_reference_required: true
 pull_request:
   creation: automatic

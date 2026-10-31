@@ -1,21 +1,21 @@
 # SDLC
 
 Repository contract for the unified SDLC workflow. Machine-readable settings live in
-[`.sdlc.yml`](.sdlc.yml); this file explains them. Project decisions and hardware
-constraints live in [`CLAUDE.md`](CLAUDE.md) and take precedence for anything about
-Chute itself.
+[`.sdlc.yml`](.sdlc.yml); this file explains them. Project behavior and hardware constraints
+live in the feature record (issue #1) and, once it lands, `README.md`; they take precedence
+for anything about peel itself.
 
 ## Provider and tooling
 
-- Provider: Forgejo (`operator/chute` on `git.dageniusal.top`). Default branch: `main`.
+- Provider: Forgejo (`operator/peel` on `git.dageniusal.top`). Default branch: `main`.
 - Provider operations go through the `source-control` skill's `sc` wrapper. Do not call
   `tea`, `gh`, `curl`, or provider APIs directly.
-- Project commands use PNPM. `package.json` holds repository tooling only; Chute has no
-  Node runtime dependency and none may be added to the scan path.
+- Project commands use PNPM. `package.json` holds repository tooling only; peel has no
+  Node runtime dependency and none may be added to the setup or print path.
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm run validate` | Syntax-check every `scripts/*.sh` (`bash -n`), then validate `.sdlc.yml` |
+| `pnpm run validate` | Syntax-check `setup.sh` and every `scripts/*.sh` (`bash -n`), then validate `.sdlc.yml` |
 | `pnpm run sdlc:validate-config -- .sdlc.yml` | Validate the SDLC configuration only |
 
 `scripts/sdlc/validate-config.mjs` is a vendored copy of the validator shipped with the
@@ -27,13 +27,12 @@ Adding `shellcheck` or tests is a dependency decision and needs approval first.
 ## Delivery
 
 - Default flavor: `stepwise`. `thin-slice` and `feature` remain available per feature.
-  The five steps in `CLAUDE.md` "Order of work" are coherent design steps, not thin slices.
 - Branches: `sdlc/{issue-number}-{short-slug}`, created from `main`.
-- Each work item is implemented in its own worktree under `../chute-worktrees`.
+- Each work item is implemented in its own worktree under `../peel-worktrees`.
 - Commits must reference their issue. Keep commits small and focused.
 - Pull requests are created automatically when a work item passes verification. Merging is
   never automatic.
-- Concurrency is 1 (one scanner, one author). Raising it requires the isolated worktrees
+- Concurrency is 1 (one printer, one author). Raising it requires the isolated worktrees
   already required above.
 - Remediation is bounded to exactly two review passes, then the item is marked `blocked`.
 - Reviewer: `general`.
@@ -41,14 +40,14 @@ Adding `shellcheck` or tests is a dependency decision and needs approval first.
 ## Verification
 
 Every work item needs observable acceptance, relevant tests, scope review, and rollback-aware
-verification. For Chute specifically:
+verification. For peel specifically:
 
-- A script, doc, or output that has not run on the real fi-6110 must say so. Never present
-  guessed output as observed. Hardware steps require manual evidence in the PR.
+- A script, doc, or output that has not run on a real Raspberry Pi 3B with a DYMO LabelWriter
+  450 Turbo must say so. Never present guessed output as observed. Hardware steps require
+  manual evidence in the PR.
 - "Tests" today means `pnpm run validate` plus hand-run steps recorded in the PR. If real
   hardware contradicts a stated assumption, say so plainly and stop rather than work around it.
 - Unrelated changes are rejected in review.
-- Work item 1 (`docs/bringup.md`, `scripts/bringup.sh`) must stop and report before step 2.
 
 ## Labels
 

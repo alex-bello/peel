@@ -1,10 +1,10 @@
 {
-  "name": "chute",
+  "name": "peel",
   "private": true,
-  "description": "Repository tooling only. Chute itself has no Node runtime dependency.",
+  "description": "Repository tooling only. peel itself has no Node runtime dependency.",
   "packageManager": "pnpm@11.5.2",
   "scripts": {
     "sdlc:validate-config": "node scripts/sdlc/validate-config.mjs",
-    "validate": "for f in scripts/*.sh; do [ -e \"$f\" ] || continue; bash -n \"$f\" || exit 1; done && pnpm run sdlc:validate-config -- .sdlc.yml"
+    "validate": "for f in scripts/*.sh; do [ -e \"$f\" ] || continue; bash -n \"$f\" || exit 1; done && { [ ! -e setup.sh ] || bash -n setup.sh; } && pnpm run sdlc:validate-config -- .sdlc.yml"
   }
 }
