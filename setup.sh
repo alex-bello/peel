@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# peel setup, stage 1: get an LPrint server running on boot as a dedicated user on a pinned
-# port. (Adding the printer comes in a later stage; no printer is configured here.)
+# peel setup: get an LPrint server running on boot as a dedicated user on a pinned port, then
+# add and configure the DYMO LabelWriter 450 Turbo on it (step_printer, near the end).
 #
 # Idempotent: safe to re-run. Re-running re-applies config.env.
 #
@@ -49,14 +49,50 @@
 #     Imager (trixie, cloud-init) cloud-init regenerated /etc/hosts as `127.0.1.1 labels chute`,
 #     so the sed edit of /etc/hosts does not persist (harmless: `labels` still resolves).
 #
+# OBSERVED on the same Pi while adding the printer (work item #5, 2026-10-31):
+#   - `lprint printers` lists display names (spaces); the queue name used by `-d`, the web UI and
+#     the IPP path has underscores (DYMO LabelWriter 450 Turbo -> DYMO_LabelWriter_450_Turbo).
+#   - `lprint drivers` pairs the attached device with its driver on a line ending `-> DRIVER`;
+#     that is the discovery source. `lprint devices` prints the usb:// URI.
+#   - delete + add of the same queue works; add of a queue under another name works, and the
+#     server does not auto-add a second queue for the same device on restart.
+#   - `lprint modify -o media-ready=NAME` alone sets media-ready AND the default media; `-o media=`
+#     alone fails and `-o media= -o media-ready=` together fail ("Attribute groups are out of
+#     order"). An unknown media-ready name is accepted silently and changes nothing (hence the
+#     validation against `lprint options` and the read-back over IPP).
+#   - the queue, media-ready and the default printer survived a service restart and a real reboot.
+#     An option set with `-o print-quality=high` appeared in LPrint's state file
+#     (/var/lib/lprint/.lprint.conf) as `print-quality-default high` after a service restart; it
+#     was not checked across a reboot.
+#   - the root IPP URI (http://host:port/) answered "not found" after a delete + add: after the
+#     restart the state file had DefaultPrinterID 10 while the new printer was id 11. It answered
+#     once `lprint default -d` was run. That command failed right after `add` ("Unable to get
+#     information ...: successful-ok") and worked after a restart.
+#   - state file timing: `lprint delete` took the printer out of the file at once, the printer from
+#     `lprint add` was not in it until the service restarted, and `lprint default` changed
+#     DefaultPrinterID within a few seconds, not instantly.
+#   - neither the lprint CLI nor IPP reported a queue's device URI or driver. LPrint's state file
+#     does list them (`<Printer ... driver="..." id="..." name="..." uri="...">`); setup.sh does
+#     not parse that internal file, so it keeps a stamp (/var/lib/peel/printer.state) and
+#     re-adds a queue it has no stamp for, once.
+#   - unsetting an option: the lprint man pages document no way to do it. `lprint modify -o
+#     print-quality=` (empty value) exited 0 but left IPP print-quality-default at -1, an invalid
+#     value; `-o print-quality=normal` set it back to the default (4). Re-adding the printer
+#     returned a removed option to its default, so that is what setup.sh does.
+#   - `lprint add -v usb://DYMO/NoSuchPrinter?serial=...` exited 0 and created the queue, so a
+#     URI for a device that is not there is not caught by the add (setup.sh does not check it).
+#   - a deauthorised USB device (sysfs `authorized`=0, a software stand-in for an unplugged
+#     printer) made `lprint devices` print "Unable to claim USB interface" and list nothing.
+#
 # APPLIED, with a rationale that is an inference, not an observation:
 #   - Removing a stale /run/lprint.sock is meant to let the root CLI work. The root CLI failure
 #     was observed, but the socket was gone after the reboot and removing it was never shown to
 #     make the root CLI work, so the stale socket is only the SUSPECTED cause.
 #
-# STILL UNVERIFIED on hardware: the final unit across a reboot, the partial-failure notice
-# live, the whole snap path (including the snap names `raw-usb`, `avahi-control` and the
-# start --enable call), printing itself, and the root CLI after stale-socket removal.
+# STILL UNVERIFIED on hardware: the partial-failure notice live, the whole snap path (including
+# the snap names `raw-usb`, `avahi-control`, the start --enable call and running the lprint CLI as
+# root against the snap's server), two DYMO printers attached at once, printing itself (work item
+# 6), and the root CLI after stale-socket removal.
 # If real hardware contradicts any assumption, setup.sh fails with a message rather than
 # working around it. It never falls back to running the server as root on the apt path.
 # The snap path is the one documented root exception (snap-managed root; amendment A1).
@@ -78,6 +114,8 @@ WAIT_SECONDS=30
 EFFECTIVE_PORT=''     # the port the server is actually listening on
 UNIT_PATH=/etc/systemd/system/lprint.service
 UDEV_RULE_PATH=/etc/udev/rules.d/99-peel-dymo.rules
+PRINTER_DRIVER=''       # discovered or configured driver, set by step_printer
+PRINTER_URI=''          # discovered or configured USB device URI, set by step_printer
 LPRINT_ROOT_SOCKET=/run/lprint.sock   # a stale one existed on the Pi after the package's root server (removal rationale: see the header)
 
 # On any failure after the apt install and before the owner check, say what may be running.
@@ -108,6 +146,7 @@ step_preflight() {
   fi
   command -v apt-get >/dev/null 2>&1 || die "apt-get not found; this script targets Raspberry Pi OS / Debian. Use a Raspberry Pi OS Lite image."
   command -v systemctl >/dev/null 2>&1 || die "systemctl not found; a systemd-based OS is required. Use a Raspberry Pi OS Lite image."
+  command -v python3 >/dev/null 2>&1 || die "python3 not found; setup reads the printer's state over IPP with the Python standard library. Install it: sudo apt-get install -y python3"
   if [[ -r /etc/os-release ]]; then
     # shellcheck source=/dev/null
     (. /etc/os-release && ok "OS: ${PRETTY_NAME:-unknown} ($(uname -m))")
@@ -169,40 +208,6 @@ apt_has_lprint() {
   local cand
   cand="$(apt-cache policy lprint 2>/dev/null | awk '/Candidate:/ { print $2 }')"
   [[ -n $cand && $cand != '(none)' ]]
-}
-
-# Set LPRINT (path) if lprint is installed. /snap/bin is checked explicitly because sudo's
-# secure_path often omits it.
-find_lprint() {
-  if LPRINT="$(command -v lprint 2>/dev/null)" && [[ -n $LPRINT ]]; then
-    return 0
-  fi
-  if [[ -x /snap/bin/lprint ]]; then
-    LPRINT=/snap/bin/lprint
-    return 0
-  fi
-  LPRINT=''
-  return 1
-}
-
-apt_pkg_installed() {
-  command -v dpkg-query >/dev/null 2>&1 \
-    && dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null | grep -q '^ii'
-}
-
-snap_installed() {
-  command -v snap >/dev/null 2>&1 && snap list "$1" >/dev/null 2>&1
-}
-
-# Where an already-installed lprint came from: apt | snap | other. (apt wins if both exist.)
-detect_lprint_source() {
-  if apt_pkg_installed lprint; then
-    echo apt
-  elif snap_installed "$SNAP_NAME"; then
-    echo snap
-  else
-    echo other
-  fi
 }
 
 # The installed version, from dpkg or snap. (`lprint --version` also works on the apt build,
@@ -482,6 +487,22 @@ step_stale_socket() {
   fi
 }
 
+# wait_for_listener: poll up to WAIT_SECONDS for an lprint listener (on LISTEN_PORT when peel's
+# own unit pins it); print its port, or nothing if none appeared.
+wait_for_listener() {
+  local i ports=''
+  for ((i = 0; i < WAIT_SECONDS; i++)); do
+    if [[ $OWN_UNIT == 1 ]]; then
+      ports="$(listening_ports lprint | grep -Fx "$LISTEN_PORT" || true)"
+    else
+      ports="$(listening_ports lprint || true)"
+    fi
+    [[ -z $ports ]] || break
+    sleep 1
+  done
+  printf '%s' "$ports"
+}
+
 step_start() {
   info "Enable and start"
   run systemctl enable --now avahi-daemon.socket avahi-daemon.service
@@ -519,16 +540,8 @@ step_start() {
   fi
 
   info "Waiting for the LPrint server to listen"
-  local i ports=''
-  for ((i = 0; i < WAIT_SECONDS; i++)); do
-    if [[ $OWN_UNIT == 1 ]]; then
-      ports="$(listening_ports lprint | grep -Fx "$LISTEN_PORT" || true)"
-    else
-      ports="$(listening_ports lprint || true)"
-    fi
-    [[ -z $ports ]] || break
-    sleep 1
-  done
+  local ports
+  ports="$(wait_for_listener)"
   if [[ -z $ports ]]; then
     service_failure_hint
     if [[ $OWN_UNIT == 1 ]]; then
@@ -559,6 +572,188 @@ step_start() {
   fi
 }
 
+# --- Printer ----------------------------------------------------------------
+
+# ipp_query ATTR...: read attributes from the running server for PRINTER_NAME (Get-Printer-
+# Attributes over IPP, see scripts/ipp-attrs.py). Needs EFFECTIVE_PORT.
+# The path /ipp/print/<name> is what the Pi was observed to use, and it is only the way in: it
+# bootstraps this query. The IPP URI shown to users (step_summary, scripts/discover.sh) is read
+# from the server's own printer-uri-supported, never built from this pattern.
+ipp_query() {
+  python3 -I "$SCRIPT_DIR/scripts/ipp-attrs.py" "http://localhost:$EFFECTIVE_PORT/ipp/print/$PRINTER_NAME" "$@"
+}
+
+# Apply one option to the printer with `lprint modify`.
+modify_option() {
+  info "lprint modify -d $PRINTER_NAME -o $1"
+  lprint_cli modify -d "$PRINTER_NAME" -o "$1" \
+    || die "'lprint modify -d $PRINTER_NAME -o $1' failed (message above). Fix the value in config.env and re-run setup.sh; the printer itself was added."
+}
+
+# restart_for_persistence: on the Pi the state file did not contain a freshly added printer until
+# the service restarted (a delete and a `lprint default` were written sooner), so setup.sh
+# restarts after a change. That also proves the change survives a reload. It is skipped on a re-run
+# that changes nothing.
+restart_for_persistence() {
+  info "Restarting $SERVICE so LPrint saves the printer to disk"
+  systemctl restart "$SERVICE"
+  if [[ -z $(wait_for_listener) ]]; then
+    service_failure_hint
+    die "The server did not come back after the restart (see above). The printer change was not confirmed saved, so the stamp in $PRINTER_STATE_FILE was not updated; re-run setup.sh once the server is healthy."
+  fi
+}
+
+step_printer() {
+  info "Printer '$PRINTER_NAME'"
+  if [[ $DRY_RUN == 1 ]]; then
+    # No lprint call here: the CLI talks to (or may start) a server, and a dry run changes nothing.
+    info "[dry-run] would discover the driver and USB URI from '$(basename "${LPRINT:-lprint}") drivers' and 'devices' (config DRIVER='${DRIVER:-<discover>}', DEVICE_URI='${DEVICE_URI:-<discover>}'); zero or several DYMO printers stop the run and name the key to set"
+    info "[dry-run] would compare name|URI|driver with the stamp in $PRINTER_STATE_FILE"
+    info "[dry-run] would run: lprint add -d $PRINTER_NAME -m <driver> -v <uri>   (after 'lprint delete -d $PRINTER_NAME' if the queue exists and the stamp differs)"
+    if [[ -n $MEDIA_READY ]]; then
+      info "[dry-run] would check MEDIA_READY=$MEDIA_READY against 'lprint options -d $PRINTER_NAME' and run 'lprint modify -d $PRINTER_NAME -o media-ready=$MEDIA_READY' if the printer's media-ready differs"
+    else
+      info "[dry-run] MEDIA_READY is empty: would warn and list the valid media names"
+    fi
+    info "[dry-run] PRINTER_OPTIONS='${PRINTER_OPTIONS}'; would apply each option with 'lprint modify' when it differs from the stamp"
+    info "[dry-run] would restart $SERVICE only if the printer was added or changed (a restart makes LPrint save its state and proves the change reloads), then record the stamp"
+    return 0
+  fi
+
+  [[ -n $EFFECTIVE_PORT ]] || die "Internal error: the server port is unknown; step_start should have set it."
+
+  # 1. Discover. A failure here changes nothing.
+  local drivers_out devices_out pair driver uri
+  drivers_out="$(lprint_cli drivers)" || die "'lprint drivers' failed (message above). Is the server running? Check: systemctl status $SERVICE"
+  devices_out="$(lprint_cli devices)" || die "'lprint devices' failed (message above). Is the server running? Check: systemctl status $SERVICE"
+  if ! pair="$(select_dymo "$drivers_out" "$devices_out")"; then
+    die "Printer discovery stopped (see above). Nothing was changed."
+  fi
+  read -r driver uri <<<"$pair"
+  ok "driver: $driver${DRIVER:+ (DRIVER in config.env)}"
+  ok "device: $uri${DEVICE_URI:+ (DEVICE_URI in config.env)}"
+
+  # 2. Reconcile the identity (name, URI, driver) by delete + re-add.
+  local queues exists=0 stamp_text='' want_stamp stamp_have action old_name
+  queues="$(lprint_cli printers | parse_printer_queue_names || true)"
+  grep -qFx -- "$PRINTER_NAME" <<<"$queues" && exists=1
+  stamp_text="$(read_state_file)"
+  stamp_have="$(stamp_value "$stamp_text" printer)"
+  want_stamp="$(printer_stamp "$PRINTER_NAME" "$uri" "$driver")"
+  action="$(reconcile_action "$exists" "$stamp_have" "$want_stamp")"
+
+  local opts_have opts_want removed
+  opts_have="$(stamp_value "$stamp_text" options)"
+  opts_want="$(tr -s ' ' <<<"$PRINTER_OPTIONS" | sed 's/^ //;s/ $//')"
+  removed="$(options_removed "$opts_have" "$opts_want" | paste -sd' ' -)"
+  local explained=0
+  if [[ $action == none && -n $removed ]]; then
+    info "PRINTER_OPTIONS no longer sets: $removed. LPrint documents no way to unset an option, so the printer is re-added to return it to its default."
+    action=readd
+    explained=1
+  fi
+
+  local changed=0 deleted=''   # deleted: queues this run removed (space separated), see add_failed_message
+  case $action in
+    none) ok "printer already added with this name, URI and driver" ;;
+    add | readd)
+      old_name="${stamp_have%%|*}"
+      if [[ $action == readd ]]; then
+        if ((explained == 1)); then
+          :   # explained above
+        elif [[ -z $stamp_have ]]; then
+          info "'$PRINTER_NAME' exists but peel has no record of its URI and driver (they cannot be read back); re-adding it once"
+        else
+          info "name, URI or driver changed since the last run ($stamp_have -> $want_stamp); re-adding"
+        fi
+        lprint_cli delete -d "$PRINTER_NAME" || die "'lprint delete -d $PRINTER_NAME' failed (message above); nothing else was changed."
+        deleted="$deleted $PRINTER_NAME"
+      fi
+      if [[ -n $old_name && $old_name != "$PRINTER_NAME" ]] && grep -qFx -- "$old_name" <<<"$queues"; then
+        info "PRINTER_NAME changed from $old_name; deleting the old queue"
+        if lprint_cli delete -d "$old_name"; then
+          deleted="$deleted $old_name"
+        else
+          warn "Could not delete the old queue '$old_name'; remove it with: sudo -u $SERVICE_USER lprint delete -d $old_name"
+        fi
+      fi
+      info "lprint add -d $PRINTER_NAME -m $driver -v <uri>"
+      lprint_cli add -d "$PRINTER_NAME" -m "$driver" -v "$uri" \
+        || die "$(add_failed_message "$PRINTER_NAME" "$SERVICE" "${deleted# }")"
+      changed=1
+      ;;
+  esac
+
+  local other
+  other="$(grep -vFx -- "$PRINTER_NAME" <<<"$queues" | grep -vFx -- "${old_name:-}" || true)"
+  if [[ -n $other ]]; then
+    warn "Other printer queues exist: $(tr '\n' ' ' <<<"$other"). peel manages only '$PRINTER_NAME'. If one is a duplicate of this USB printer (for example the one LPrint added by itself), remove it with: sudo -u $SERVICE_USER lprint delete -d <name>"
+  fi
+
+  # 3. Media. Compare with what the server reports, not with a stamp.
+  local options_out valid_media problem cur_ready
+  options_out="$(lprint_cli options -d "$PRINTER_NAME")" || die "'lprint options -d $PRINTER_NAME' failed (message above)."
+  valid_media="$(parse_media_names <<<"$options_out")"
+  if problem="$(media_ready_problem "$MEDIA_READY" "$valid_media")"; then
+    warn "$problem. The printer keeps its current media (default: $(parse_default_media <<<"$options_out"))."
+    warn "Valid media names for '$PRINTER_NAME' (put one in config.env as MEDIA_READY, then re-run setup.sh):"
+    grep -E '^  -o media=' <<<"$options_out" | sed -e 's/^  -o media=//' -e 's/^/       /' >&2
+  else
+    # OBSERVED (lprint 1.3.1): `-o media-ready=NAME` alone sets both media-ready and the default
+    # media. `-o media=NAME` alone fails ("Unsupported media-default keyword value") and combined
+    # with media-ready fails ("Attribute groups are out of order"). An unknown media-ready name
+    # is accepted silently (exit 0) and changes nothing, hence the check against the valid names
+    # above and the read-back below.
+    cur_ready="$(ipp_query media-ready | ipp_attr media-ready || true)"
+    if [[ $cur_ready == "$MEDIA_READY" ]]; then
+      ok "media-ready already $MEDIA_READY"
+    else
+      modify_option "media-ready=$MEDIA_READY"
+      cur_ready="$(ipp_query media-ready | ipp_attr media-ready || true)"
+      [[ $cur_ready == "$MEDIA_READY" ]] \
+        || die "LPrint accepted media-ready=$MEDIA_READY but the printer reports '${cur_ready:-<none>}'. Report this with the output of scripts/discover.sh."
+      changed=1
+    fi
+  fi
+
+  # 4. PRINTER_OPTIONS: not readable back as a whole, so compare with the stamp.
+  local kv opts=()
+  if [[ $action != none || $opts_have != "$opts_want" ]]; then
+    read -ra opts <<<"$PRINTER_OPTIONS"
+    for kv in "${opts[@]}"; do
+      modify_option "$kv"
+      changed=1
+    done
+  fi
+
+  # 5. Persist: restart if anything changed, confirm, then record the stamp.
+  if ((changed == 1)); then
+    restart_for_persistence
+    lprint_cli printers | parse_printer_queue_names | grep -qFx -- "$PRINTER_NAME" \
+      || die "Printer '$PRINTER_NAME' is not listed after the restart. Run: sudo -u $SERVICE_USER lprint printers, and journalctl -u $SERVICE -b --no-pager"
+    ok "printer '$PRINTER_NAME' present after the restart"
+    # Deleting the old queue leaves LPrint pointing at a default printer that no longer exists,
+    # so the server's root IPP URI answers "not found" until a default is set. OBSERVED: `lprint
+    # default` failed ("Unable to get information ...: successful-ok") right after `add`, and
+    # worked after the restart, so it is set here. A failure only matters for tools that rely on
+    # the default; the printer is addressed by name everywhere in peel.
+    lprint_cli default -d "$PRINTER_NAME" \
+      || warn "Could not make '$PRINTER_NAME' the default printer; it is still usable by name. Set it by hand with: sudo -u $SERVICE_USER lprint default -d $PRINTER_NAME   (a re-run of setup.sh does not retry this unless the printer or its settings change)"
+    if [[ -n $MEDIA_READY ]] && ! media_ready_problem "$MEDIA_READY" "$valid_media" >/dev/null; then
+      cur_ready="$(ipp_query media-ready | ipp_attr media-ready || true)"
+      [[ $cur_ready == "$MEDIA_READY" ]] \
+        || die "After the restart the printer reports media-ready='${cur_ready:-<none>}', not '$MEDIA_READY'. LPrint did not keep the setting; see journalctl -u $SERVICE -b --no-pager and report it."
+      ok "media-ready is $cur_ready after the restart"
+    fi
+  fi
+  if ((changed == 1)); then
+    write_state_file "$want_stamp" "$opts_want"
+    ok "recorded $PRINTER_STATE_FILE"
+  fi
+  PRINTER_DRIVER=$driver
+  PRINTER_URI=$uri
+}
+
 step_summary() {
   if [[ $DRY_RUN == 1 ]]; then
     info "Dry run complete; nothing was changed."
@@ -566,16 +761,31 @@ step_summary() {
   fi
   local owner='root (snap-managed; documented exception)'
   [[ $LPRINT_SOURCE == snap ]] || owner="$(service_owner)"
+  # The IPP path comes from the server's own printer-uri-supported, never from an assumed pattern.
+  local ipp_uri ipp_path ready host
+  ipp_uri="$(ipp_query printer-uri-supported | ipp_attr printer-uri-supported | grep -m1 '^ipp://' || true)"
+  ipp_path="${ipp_uri#ipp://*/}"
+  ready="$(ipp_query media-ready | ipp_attr media-ready | paste -sd, - || true)"
+  host="$PRINTER_HOSTNAME.local"
   echo
-  ok "Done. The LPrint server is running; no printer is added yet."
+  ok "Done. The LPrint server is running and the printer is configured."
   echo "    LPrint:     $(lprint_version) via $LPRINT_SOURCE ($LPRINT)"
   echo "    Service:    $SERVICE, enabled: $(systemctl is-enabled "$SERVICE" 2>/dev/null || echo unknown), active: $(systemctl is-active "$SERVICE" 2>/dev/null || echo unknown)"
   echo "    Owner:      $owner"
   echo "    Port:       $EFFECTIVE_PORT$([[ $OWN_UNIT == 1 ]] && echo ' (pinned by LISTEN_PORT)' || echo ' (NOT pinned: snap-managed unit)')"
-  echo "    Web UI:     http://$PRINTER_HOSTNAME.local:$EFFECTIVE_PORT/   (answered HTTP 200 on the Pi's pinned port in recon)"
-  [[ $LPRINT_SOURCE == snap ]] || echo "    State:      $STATE_DIR (HOME of the service; persistence not yet re-verified on hardware)"
+  echo "    Printer:    $PRINTER_NAME, driver $PRINTER_DRIVER"
+  echo "    Device:     $PRINTER_URI"
+  echo "    Media:      ${ready:-<not reported>} (media-ready as reported by the server)"
+  echo "    Web UI:     http://$host:$EFFECTIVE_PORT/   (the server answered HTTP 200 there in recon; $host resolves only on this subnet via mDNS)"
+  if [[ -n $ipp_path ]]; then
+    echo "    IPP URI:    ipp://$host:$EFFECTIVE_PORT/$ipp_path   (path read from the server's printer-uri-supported)"
+  else
+    warn "Could not read printer-uri-supported from the server, so no IPP URI is printed. Run scripts/discover.sh."
+  fi
+  [[ $LPRINT_SOURCE == snap ]] || echo "    State:      $STATE_DIR (HOME of the service), $PRINTER_STATE_FILE (what setup.sh last applied)"
   [[ $LPRINT_SOURCE == snap ]] || echo "    CLI:        sudo -u $SERVICE_USER lprint <subcommand>   (observed to work; as root it does not)"
   echo "    Logs:       journalctl -u $SERVICE -f"
+  echo "    Facts:      scripts/discover.sh"
 }
 
 step_preflight
@@ -585,4 +795,5 @@ step_packages
 step_service_user
 step_unit
 step_start
+step_printer
 step_summary

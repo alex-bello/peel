@@ -11,6 +11,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/systemd"
 cp "$PEEL_ROOT/setup.sh" "$tmp/setup.sh"
 cp "$PEEL_ROOT/scripts/lib.sh" "$tmp/scripts/lib.sh"
+cp "$PEEL_ROOT/scripts/ipp-attrs.py" "$tmp/scripts/ipp-attrs.py"
 cp "$PEEL_ROOT/systemd/lprint.service" "$tmp/systemd/lprint.service"
 cp "$PEEL_ROOT/config.env.example" "$tmp/config.env.example"
 
@@ -20,13 +21,15 @@ assert_eq "DRY_RUN=1 ./setup.sh exits 0" "0" "$status"
 
 # Every step announces itself.
 for step in "Preflight" "Hostname" "Checking that CUPS is absent" "Packages" \
-  "Service user" "systemd service" "Enable and start"; do
+  "Service user" "systemd service" "Enable and start" "Printer 'DYMO_LabelWriter_450_Turbo'"; do
   case $out in
     *"==> $step"*) pass "plan shows step: $step" ;;
     *) fail "plan shows step: $step" ;;
   esac
 done
-for want in "server-port=8631" "spool-directory=/var/spool/lprint" "log-file=-" "User=lprint" \
+for want in "lprint add -d DYMO_LabelWriter_450_Turbo -m <driver> -v <uri>" "lprint delete -d DYMO_LabelWriter_450_Turbo" \
+  "/var/lib/peel/printer.state" "MEDIA_READY is empty: would warn and list the valid media names" \
+  "would restart lprint.service only if the printer was added or changed" "server-port=8631" "spool-directory=/var/spool/lprint" "log-file=-" "User=lprint" \
   'idVendor}=="0922"' "Dry run complete; nothing was changed."; do
   case $out in
     *"$want"*) pass "plan mentions: $want" ;;
@@ -74,6 +77,19 @@ if [[ $out == *"Installing lprint from apt"* ]]; then
 else
   pass "apt-get update ordering skipped: lprint already installed on this host"
 fi
+
+# The plan above only says what would run. step_printer returns before any lprint call in a dry
+# run (it would talk to, or start, a server); that is not asserted here, only reviewed.
+
+# MEDIA_READY set: the plan names the value.
+cfg="$tmp/media.env"
+echo 'MEDIA_READY=oe_shipping-label_2.125x4in' >"$cfg"
+out2="$(CONFIG_FILE="$cfg" DRY_RUN=1 bash "$tmp/setup.sh" 2>&1)"
+assert_eq "DRY_RUN with MEDIA_READY exits 0" "0" "$?"
+case $out2 in
+  *"MEDIA_READY=oe_shipping-label_2.125x4in against"*) pass "plan checks the configured MEDIA_READY" ;;
+  *) fail "plan checks the configured MEDIA_READY" ;;
+esac
 
 # Nothing was created next to the script (no config.env, no state).
 assert_false "DRY_RUN created no config.env" test -e "$tmp/config.env"
