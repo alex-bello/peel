@@ -1,0 +1,31 @@
+schema: 1
+labels:
+  mode: native
+  vocabulary: {"sdlc":"sdlc","sdlc-feature":"sdlc-feature","sdlc-work-item":"sdlc-work-item","sdlc-requirements":"sdlc-requirements","sdlc-design":"sdlc-design","ready":"ready","in-progress":"in-progress","review":"review","complete":"complete","blocked":"blocked","needs-discovery":"needs-discovery"}
+  mappings: {"sdlc":"sdlc","sdlc-feature":"sdlc-feature","sdlc-work-item":"sdlc-work-item","sdlc-requirements":"sdlc-requirements","sdlc-design":"sdlc-design","ready":"ready","in-progress":"in-progress","review":"review","complete":"complete","blocked":"blocked","needs-discovery":"needs-discovery"}
+branch:
+  pattern: sdlc/{issue-number}-{short-slug}
+  default: main
+implementation:
+  create_branch: true
+  use_worktree: true
+  worktree_root: ../chute-worktrees
+  commit_reference_required: true
+pull_request:
+  creation: automatic
+verification:
+  require_tests: true
+  require_acceptance_checks: true
+  require_manual_evidence_when_relevant: true
+  reject_unrelated_changes: true
+delivery:
+  default_flavor: stepwise
+  flavors: ["thin-slice", "stepwise", "feature"]
+orchestration:
+  automatic_lifecycle: true
+  max_concurrency: 1
+  max_remediation_passes: 2
+  reviewers: ["general"]
+reconciliation:
+  close_child_on_merge: true
+  close_feature_on_complete: true
