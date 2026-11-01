@@ -22,7 +22,7 @@ This README keeps three kinds of statement apart:
 - **From the script**: the exact text a peel script prints, copied from its source. This is what to expect, not a capture from the Pi.
 - **Unverified**: not run on hardware. Marked as such where it appears.
 
-Unverified in particular: every step on macOS, iOS, Windows and Linux clients; the snap install path; two DYMO printers attached at once; physically unplugging the printer; cloning the repo from the Forgejo URL below on the Pi (the recorded hardware runs used a copy cloned from a mirror); and a custom text label, plus the default test label on matching media (see [Test print](#7-test-print)).
+Unverified in particular: every step on macOS, iOS, Windows and Linux clients; the snap install path; two DYMO printers attached at once; physically unplugging the printer; cloning the repo from the Forgejo URL below on the Pi (the recorded hardware runs used a copy cloned from a mirror); and a custom text label, plus the default test label on matching media (see [Test print](#7-test-print)); and the whole [Recovery](#recovery) section (cloning, rebuild, hardening), none of which has been run.
 
 ## What you need
 
@@ -64,7 +64,7 @@ nano config.env
 
 Observed: `git` had to be installed on the test Pi. Unverified: `git clone` from the URL above on the Pi (if that server asks for credentials or is not reachable from your Pi, clone from wherever you host the repository).
 
-`config.env` is gitignored and holds no secrets. The defaults are fine for a first run except `MEDIA_READY` (see [step 6](#6-choose-your-label-size)). Keep a copy of your `config.env` somewhere safe.
+`config.env` is gitignored and holds no secrets. The defaults are fine for a first run except `MEDIA_READY` (see [step 6](#6-choose-your-label-size)). Keep a copy of your `config.env` somewhere safe (see [Recovery](#recovery)).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -267,6 +267,126 @@ If setup stops after installing the package, it prints a notice that the package
 
 After real reboots of the test Pi, SSH to port 22 from one Mac was blocked for several minutes (about 14 at the longest) while `ping` and the LPrint port answered, and the Pi's sshd was running throughout. The cause is unknown and was not shown to be peel's. If you cannot SSH right after a reboot but the printer answers, wait and retry.
 
+## Recovery
+
+If the SD card dies, there are two ways back to a working printer: swap in a **cloned spare card** (no setup, if the clone is current), or **rebuild a blank card** from this repository and a saved `config.env`. Pick the clone if you prepared one; the rebuild needs nothing prepared except a saved `config.env`.
+
+**Nothing in this section has been run.** No card has been cloned, no card has been rebuilt from a saved `config.env`, and no recovery drill has been done on the Pi 3B with the DYMO 450 Turbo, so no step count here is a measurement. Every command below is marked unverified; they are the standard tools' usual forms, not captures. The `dd` commands overwrite whatever device you name: read [Choosing the right device](#choosing-the-right-device-unverified) before running one. The recovery drill (a cloned card booting to a working printer, or a blank card rebuilt by the steps below, with the steps and count recorded) is still to be done, and until it is, treat these paths as untested.
+
+What peel keeps on the card, per the setup script and the feature design (not tested as a backup): the OS, the cloned `peel` directory with your `config.env`, LPrint's state under `/var/lib/lprint`, the stamp `/var/lib/peel/printer.state`, the udev rule, the systemd unit and the hostname. `setup.sh` rebuilds all of it from `config.env`, which is what makes the rebuild short. The Pi's Ethernet MAC address belongs to the Pi, not the card, so the DHCP reservation from [step 2](#2-give-the-pi-a-stable-address) should still match after a card swap into the same Pi (unverified).
+
+### Choosing the right device (unverified)
+
+Both paths below copy whole disks with `dd`. Writing to the wrong device destroys its data, and `dd` does not ask. Before every `dd`:
+
+- Shut the Pi down first (`sudo shutdown -h now`), wait until its activity LED stops, unplug the power, and only then take the card out. A card cloned while the Pi was running can be inconsistent.
+- Identify the card by its **size and by whether it is removable or external**, comparing the list with the card plugged in and not plugged in. On macOS, `diskutil list external physical` lists only external physical disks; a built-in SD card slot may not appear there, so if the card is not listed, run plain `diskutil list` and identify the card by size and name, never by assumption. On Linux, `lsblk -o NAME,SIZE,MODEL,TRAN,RM,MOUNTPOINT` shows size, model and the removable flag. Never pick the disk your computer boots from.
+- `if=` is the source and `of=` is the destination. Swapping them overwrites the good card with the blank one.
+- A spare card the **same size or larger** than the source is fine. A smaller one may fail to fit, even if the used space is small, because `dd` copies the whole device. Two cards sold with the same nominal size can differ slightly in real capacity, so prefer the same model or a larger card. On a larger card the extra space is simply unused (the partitions are not enlarged; unverified).
+- The commands below use `<N>` (macOS disk number) and `sdX` or `sdY` (Linux device) as placeholders; replace them with what your listing shows. SD card readers on some Linux machines appear as `/dev/mmcblk0` instead of `/dev/sdX`.
+
+### Cloned spare card (unverified)
+
+Do this once the printer works (after [step 7](#7-test-print)), and again after any change you want the spare to have, such as a new `MEDIA_READY`. The clone is a snapshot, not a mirror.
+
+**1. Read the card into an image file** (with the card in a reader on your computer, Pi powered off):
+
+macOS (unverified):
+
+```sh
+diskutil list external physical             # find the card, e.g. disk4; check the size
+diskutil unmountDisk /dev/disk<N>
+sudo dd if=/dev/rdisk<N> of=peel-card.img bs=4m status=progress
+diskutil eject /dev/disk<N>
+```
+
+`rdisk` is the raw device, which is faster than `disk`. Whether your macOS `dd` accepts `status=progress` depends on the macOS version (check `man dd`); without it, press Ctrl-T for progress.
+
+Linux (unverified):
+
+```sh
+lsblk -o NAME,SIZE,MODEL,TRAN,RM,MOUNTPOINT      # find the card, e.g. sdb; check the size
+sudo umount /dev/sdX1 /dev/sdX2                   # only the partitions that are mounted
+sudo dd if=/dev/sdX of=peel-card.img bs=4M status=progress
+sync
+```
+
+`peel-card.img` is as large as the card (for example 32 GB for a 32 GB card), so keep it on a disk with room. Keep it somewhere safe; it holds the Pi's SSH host keys and your user's password hash or authorized keys, so treat it as private (unverified for this card).
+
+**2. Write the image to the spare card.** Either with Raspberry Pi Imager: Choose OS, scroll to "Use custom", pick `peel-card.img`, choose the spare card, and **decline OS customisation** (the image already holds your settings; menu labels differ between Imager versions, and Imager writing a custom image has not been tried here). Imager is for writing images; it is not known to read a card into an image, which is why step 1 uses `dd`. Or with `dd`:
+
+macOS (unverified):
+
+```sh
+diskutil unmountDisk /dev/disk<N>            # the SPARE card's number
+sudo dd if=peel-card.img of=/dev/rdisk<N> bs=4m status=progress
+diskutil eject /dev/disk<N>
+```
+
+Linux (unverified):
+
+```sh
+lsblk -o NAME,SIZE,MODEL,TRAN,RM,MOUNTPOINT      # find the SPARE card (sdY below); check the size
+sudo umount /dev/sdY1 /dev/sdY2                   # only the partitions that are mounted
+sudo dd if=peel-card.img of=/dev/sdY bs=4M status=progress conv=fsync   # sdY = the SPARE card
+sync
+```
+
+**3. Keep it, and swap it in.** Label the spare and store it with the Pi. To use it: power the Pi off, replace the card, power on. If the old card is still readable, keep it out of any Pi until you know what went wrong with it.
+
+Expected after a swap, unverified: the service starts by itself at boot (observed for the original card, not for a clone), the printer is listed, and clients need no change because the hostname, port and IPP URL are the same. Check with `systemctl status lprint` and `sudo ./scripts/discover.sh`. A re-run of `./setup.sh` is safe and should change nothing if the clone is current; it is the way to apply a newer `config.env`.
+
+**Do not put two cards on the network at once.** A clone has the same hostname (`labels`), the same service settings and the same SSH host keys as the original. With one Pi only one card fits, so this applies when you boot the spare in a second Pi (or any second machine) while the original is still running: the two would advertise the same `labels.local` name (mDNS resolves one of them or renames the other, behavior not tested), clients may print to either, and the DHCP reservation follows the MAC address, so the second Pi gets a different IP. Power off or remove the first before booting the second.
+
+### Blank-card rebuild (unverified)
+
+For when there is no clone. It needs your saved `config.env` (see the next section) and network access on the Pi for apt and the repository. It repeats the README's flash, clone-and-configure and setup steps ([1](#1-flash-the-sd-card), [3](#3-get-the-repo-onto-the-pi-and-configure-it) and [5](#5-run-setup)), with your saved file in place of editing a fresh one.
+
+**6 manual steps are documented** (a count of the steps below, not a measured number; the drill that would time them and check them has not been run):
+
+1. **Flash** a new card in Raspberry Pi Imager with the same settings as [step 1](#1-flash-the-sd-card): Raspberry Pi 3, Raspberry Pi OS Lite (64-bit), hostname `labels`, your user, SSH on.
+2. **Connect and power on**: card in the Pi, Ethernet, the DYMO's USB cable and power, printer first, then the Pi.
+3. **SSH in**: `ssh <your-user>@labels.local`. The new card has new SSH host keys, so your computer will probably refuse with a "host identification has changed" warning; clear the old entry with `ssh-keygen -R labels.local` and connect again (unverified).
+4. **Get the repository**: on the Pi, `sudo apt-get update && sudo apt-get install -y git` (skip if `git --version` works), then `git clone https://git.dageniusal.top/operator/peel.git` (the same clone as README [step 3](#3-get-the-repo-onto-the-pi-and-configure-it), with the same unverified-from-the-Pi caveat).
+5. **Restore `config.env`**: from your computer, `scp ~/peel-config.env <your-user>@labels.local:peel/config.env` (this assumes you cloned into your home directory as in step 4 and saved your copy as `~/peel-config.env` on your computer). Do not run `cp config.env.example config.env`; your saved file replaces it.
+6. **Run setup**: `cd peel && ./setup.sh`. With a `MEDIA_READY` already in the saved file, the printer should be configured in one run.
+
+Then, optionally and not counted: `sudo ./scripts/test-print.sh` to check that a label comes out (see [step 7](#7-test-print)). There is no step for clients if the hostname, port and queue name are unchanged (unverified), and none for the router if the Pi is the same Pi (same MAC address).
+
+What `setup.sh` does for each of these on a blank card is described in [step 5](#5-run-setup) and was observed on one fresh card, not on a rebuild from a saved `config.env`. If `./setup.sh` fails, it says what to do; see [Setup failure messages](#setup-failure-messages).
+
+### Keep a copy of config.env (copy commands unverified)
+
+`config.env` holds only settings (hostname, port, queue name, media and options) and **no secrets**: the template `config.env.example` says none belong there and defines no password, token or key. It is gitignored and must never be committed, so the repository does not back it up. Keep a copy on a computer you control, outside the Pi, next to your notes about the Pi (the Imager user name, the router's DHCP reservation):
+
+```sh
+scp <your-user>@labels.local:peel/config.env ~/peel-config.env     # save a copy from your computer
+```
+
+The `scp` command is unverified, like the rest of this section; any way of getting the file off the Pi works. Refresh the copy whenever you change the file, for example after choosing `MEDIA_READY`. `setup.sh` reads `config.env` as a bash script, so only restore a copy that you wrote yourself; if you ever add something secret to it, treat the copy as secret as well. Copying the file onto a cloned card is not needed; it is already there.
+
+### Optional hardening: read-only overlay filesystem (optional, unverified)
+
+**Optional. Not enabled by `setup.sh`, and not planned to be. Not run on the test Pi.** Raspberry Pi OS can mount the root filesystem read-only and keep all changes in RAM, which reduces SD card writes and lets the Pi be powered off without a clean shutdown. It does not replace a spare card: a card can still fail, and RAM-backed changes are lost at reboot.
+
+Unverified outline, from the `raspi-config` tool's documented options (menu names differ between releases; confirm in your version):
+
+1. Finish setup first and confirm the printer works (`./setup.sh`, then a test print).
+2. `sudo raspi-config`, then Performance Options, then Overlay File System, answer yes to enabling it, and yes or no to making the boot partition read-only. Reboot to apply.
+3. To change anything later (`config.env`, a re-run of `./setup.sh`, apt upgrades), disable the overlay in the same menu, reboot, make the change, then enable it again.
+
+What this probably means for peel, reasoned from the design notes and not tested: LPrint's state file under `/var/lib/lprint` appears to be written at shutdown (some changes were seen in it sooner, a newly added printer only after a restart), and with the overlay on that file would sit in RAM, so a printer or media change made through the web UI or `lprint modify` may be lost on reboot; logs (`journalctl`) and the print spool also live in RAM; and the 1 GB of RAM on a Pi 3B bounds how much changes can accumulate. Whether the pinned port, the udev rule, the `lprint` service and the printer survive a reboot with the overlay on has not been checked. A cloned card (the section above) also clones the overlay setting.
+
+### Optional hardening: USB boot on the Pi 3B (optional, unverified)
+
+**Optional. Not enabled by `setup.sh`. Not run on the test Pi.** The Pi 3B can boot from a USB mass storage device (for example a USB flash drive or SSD) instead of the SD card, which some people prefer to a card for wear. That this is more durable here has not been tested. The Pi 3B (unlike the 3B+) does not have this switched on from the factory; per the Raspberry Pi documentation, it is switched on by a one-time programmable (OTP) bit that **cannot be undone**. Unverified outline:
+
+1. On a Pi 3B booted from the SD card, add `program_usb_boot_mode=1` to `/boot/firmware/config.txt` (the path on recent Raspberry Pi OS; older releases use `/boot/config.txt`), reboot, and check that the bit took with `vcgencmd otp_dump | grep 17:` (the documentation gives `17:3020000a` as the expected value; not seen here). Remove the line from `config.txt` afterwards; it is only needed once.
+2. Write the OS to the USB device the same way as to a card (Imager, or the clone steps above with the USB device as the destination; identify it as carefully as in [Choosing the right device](#choosing-the-right-device-unverified)).
+3. Boot with the USB device attached and, to be sure which one is used, without the SD card. Whether a bootable SD card is tried first, and how long the Pi 3B waits for the USB device, are not established here.
+
+Things to weigh, all unverified for peel: the Pi 3B's Ethernet and its USB ports share one USB 2.0 bus, and the DYMO is on that bus too; a USB flash drive can wear out as well; and the OTP change is permanent.
+
 ## Known limitations
 
 - Web UI and printing are open on the LAN; authentication is not implemented.
@@ -274,7 +394,7 @@ After real reboots of the test Pi, SSH to port 22 from one Mac was blocked for s
 - The client matrix has not been run; the client sections above are outlines.
 - The default test label size is tied to one media (follow-up #14); the `DEVICE_URI` override is not checked against attached devices (follow-up #12); wording and documentation fixes from review, and some remaining hardware evidence for the printer step, are tracked in follow-up #11.
 - Not run on hardware: two DYMO printers at once, a physical unplug, the failure message for a failed `lprint add`, and printer options other than media across a reboot.
-- Recovery after an SD card failure (cloned spare card, rebuild) is not documented yet; it is work item #8 of the same feature, and no recovery drill has been run.
+- [Recovery](#recovery) (cloned spare card, blank-card rebuild, optional hardening) is documented, but none of it has been run: no card was cloned, no rebuild from a saved `config.env` was done, and no recovery drill was run on the Pi.
 - No label designer. The IPP endpoint above is where one would connect.
 
 ## Repo layout and development
